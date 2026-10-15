@@ -23,7 +23,7 @@ RUN python -c "import gzip, urllib.request; data = urllib.request.urlopen('https
     && chmod +x /usr/local/bin/gost \
     && /usr/local/bin/gost -V
 
-COPY app.py vm.js entrypoint.sh ./
+COPY app.py vm.js proxy_options.py entrypoint.sh ./
 
 EXPOSE 8080
 ENTRYPOINT ["/app/entrypoint.sh"]

@@ -14,6 +14,7 @@ re-synced against the frontend bundle when OpenAI changes the instruction set.
 Environment:
 - SENTINEL_SOLVER_KEY: when set, requests must send `Authorization: Bearer <key>`
 - SENTINEL_SOLVER_PROXY: outbound proxy for the browser, should match the main service egress
+- SENTINEL_SOLVER_UPSTREAM: authenticated upstream forwarded by entrypoint.sh to a local socks5
 - SENTINEL_SOLVER_USER_AGENT: optional, defaults to a Linux Chrome UA built from the bundled Chromium
 - SENTINEL_SOLVER_TIMEZONE: optional page timezone (e.g. Asia/Shanghai), should match the egress IP
 - SENTINEL_SOLVER_REFRESH_SECONDS: how often the page is reopened, default 1800
@@ -35,6 +36,7 @@ from fastapi import FastAPI, Header, HTTPException
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 from playwright_stealth import Stealth
 from pydantic import BaseModel
+from proxy_options import browser_proxy_options
 
 CHATGPT_URL = "https://chatgpt.com/"
 CHALLENGE_TITLES = ("请稍候", "Just a moment", "Attention Required")
@@ -103,6 +105,7 @@ _SOLVE_VIA_VM = "([dx, p]) => window.__sentinelVM.turnstile(dx, p)"
 
 SOLVER_KEY = os.getenv("SENTINEL_SOLVER_KEY", "").strip()
 PROXY = os.getenv("SENTINEL_SOLVER_PROXY", "").strip()
+UPSTREAM = os.getenv("SENTINEL_SOLVER_UPSTREAM", "").strip()
 USER_AGENT = os.getenv("SENTINEL_SOLVER_USER_AGENT", "").strip()
 TIMEZONE = os.getenv("SENTINEL_SOLVER_TIMEZONE", "").strip()
 REFRESH_SECONDS = max(60, int(os.getenv("SENTINEL_SOLVER_REFRESH_SECONDS", "1800")))
@@ -139,8 +142,11 @@ class SolverPage:
             "channel": "chromium",
             "args": ["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
         }
-        if PROXY:
-            launch_kwargs["proxy"] = {"server": PROXY}
+        launch_proxy, proxy_note = browser_proxy_options(PROXY, UPSTREAM)
+        if launch_proxy:
+            launch_kwargs["proxy"] = launch_proxy
+        if proxy_note:
+            print(f"[sentinel-solver] proxy: {proxy_note}", flush=True)
         self._browser = await self._playwright.chromium.launch(**launch_kwargs)
         if not self.user_agent:
             major = self._browser.version.split(".")[0]

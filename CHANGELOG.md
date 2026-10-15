@@ -10,6 +10,10 @@
 + [新增] 清障 provider 失败后 30 秒冷却，避免每个请求都白等一次求解超时。
 + [同步] 合入上游 PR #418 的两个后续修复：`chrome146` 指纹与请求头对齐（不再混用 Edge 身份）、
   账号刷新遇到 Cloudflare 挑战 403 时最多重试三次（JSON 403 不重试）。
++ [修复] 修正 sentinel 求解服务在代理 URL 带账号密码时打不开 chatgpt.com 的问题：`user:pass@host` 的账密现在会拆到
+  Playwright 的 `username`/`password`（Chromium 不认 `server` 里的 userinfo，之前直接报
+  `net::ERR_INVALID_AUTH_CREDENTIALS`）；带认证的 SOCKS5 上游改用 `SENTINEL_SOLVER_UPSTREAM`，
+  由入口脚本经 gost 转发成本机无认证 socks5，设置它时 `SENTINEL_SOLVER_PROXY` 被忽略。
 
 ## 1.8.0 - 2026-07-28
 

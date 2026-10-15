@@ -75,7 +75,8 @@ Docker 镜像不包含 Chromium；容器启动时由入口脚本下载完整 Chr
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `SENTINEL_SOLVER_KEY` | 空 | 访问密钥 |
-| `SENTINEL_SOLVER_PROXY` | 空 | 浏览器出网代理，应与主服务访问 chatgpt.com 的出口一致 |
+| `SENTINEL_SOLVER_PROXY` | 空 | 浏览器出网代理，应与主服务访问 chatgpt.com 的出口一致；`user:pass@host` 形式的账密会被拆到 Playwright 的 `username`/`password`（Chromium 不认 URL 里的 userinfo） |
+| `SENTINEL_SOLVER_UPSTREAM` | 空 | 带认证的上游（如 `socks5://u:p@host:1080`）。Chromium 无法为 SOCKS5 上游做认证，入口脚本用 gost 把它转发成本机无认证的 socks5，浏览器只连 `127.0.0.1:1080`；设置它时 `SENTINEL_SOLVER_PROXY` 被忽略 |
 | `SENTINEL_SOLVER_USER_AGENT` | 按内置 Chromium 版本生成 | 页面 UA |
 | `SENTINEL_SOLVER_TIMEZONE` | 跟随系统 | 页面时区（如 `Asia/Shanghai`），应与出口 IP 所在地一致 |
 | `SENTINEL_SOLVER_REFRESH_SECONDS` | 1800 | 页面定期重开的间隔 |
