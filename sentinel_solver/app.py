@@ -176,6 +176,35 @@ class SolverPage:
         async with self._lock:
             self._opened_at = 0.0
 
+    async def clearance(self) -> dict[str, object]:
+        """chatgpt.com cookies + User-Agent of the live, challenge-cleared page.
+
+        The main service runs without a browser. When Cloudflare challenges it, a
+        ``cf_clearance`` cookie is only accepted together with the exact
+        User-Agent and the same egress IP that solved the challenge. This page
+        already holds that pair, so hand it over instead of running a second
+        solver.
+        """
+        await self.page()
+        context = self._context
+        if context is None:
+            raise RuntimeError("chatgpt.com page is not open")
+        cookies = await context.cookies(CHATGPT_URL)
+        return {
+            "ready": True,
+            "user_agent": self.user_agent,
+            "cookies": [
+                {
+                    "name": str(item.get("name") or ""),
+                    "value": str(item.get("value") or ""),
+                    "domain": str(item.get("domain") or ""),
+                    "path": str(item.get("path") or "/"),
+                }
+                for item in cookies
+                if item.get("name")
+            ],
+        }
+
     async def _reopen(self) -> None:
         if self._context is not None:
             try:
@@ -339,6 +368,16 @@ def require_key(authorization: str | None) -> None:
 @app.get("/health")
 async def health() -> dict[str, object]:
     return solver.status()
+
+
+@app.get("/v1/clearance")
+async def clearance(authorization: str | None = Header(default=None)) -> dict[str, object]:
+    """把本页已通过的 Cloudflare 清障（User-Agent + cookie）交给主服务。"""
+    require_key(authorization)
+    try:
+        return await solver.clearance()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"clearance failed: {exc}") from exc
 
 
 @app.post("/v1/turnstile")

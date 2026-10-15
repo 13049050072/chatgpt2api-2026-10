@@ -18,6 +18,10 @@ from services.config import config
 
 FlareSolverrRequestMethod = Callable[[str, bytes, dict[str, str], float], bytes]
 
+# A clearance provider that just failed is not retried on every request; without
+# this a down FlareSolverr/solver would add its full timeout to each upstream call.
+CLEARANCE_FAILURE_COOLDOWN_SECONDS = 30.0
+
 
 def normalize_proxy_url(url: str) -> str:
     """Normalize proxy URLs for curl_cffi.
@@ -50,11 +54,13 @@ class ProxyRuntimeProfile:
 
     @property
     def clearance_enabled(self) -> bool:
-        return (
-            self.runtime_enabled
-            and bool(self.clearance.get("enabled"))
-            and self.clearance_mode in {"manual", "flaresolverr"}
-        )
+        # Clearance does not depend on the proxy: a direct egress gets challenged
+        # too, and the solved cookie is what carries the request through.
+        return bool(self.clearance.get("enabled")) and self.clearance_mode in {
+            "manual",
+            "flaresolverr",
+            "solver",
+        }
 
     @property
     def clearance_mode(self) -> str:
@@ -155,6 +161,63 @@ class FlareSolverrClearanceProvider:
             return response.read()
 
 
+class SentinelSolverClearanceProvider:
+    """Clearance taken from the sentinel solver's own chatgpt.com page.
+
+    The solver already keeps a Chromium that passed the Cloudflare challenge, so
+    its cookie/User-Agent pair is exactly what a request needs, and it comes from
+    the egress that solved it. This is the only clearance source that works
+    without a second browser next to the main service.
+    """
+
+    def __init__(
+        self,
+        base_url: str,
+        key: str = "",
+        request_method: Callable[[str, dict[str, str], float], bytes] | None = None,
+    ) -> None:
+        self.base_url = str(base_url or "").strip().rstrip("/")
+        self.key = str(key or "").strip()
+        self._request_method = request_method or self._urllib_get
+
+    def get_clearance(self, target_url: str, proxy_url: str = "", timeout_sec: int = 60) -> ClearanceBundle | None:
+        if not self.base_url:
+            return None
+
+        headers = {"Accept": "application/json"}
+        if self.key:
+            headers["Authorization"] = f"Bearer {self.key}"
+        try:
+            raw_response = self._request_method(
+                f"{self.base_url}/v1/clearance",
+                headers,
+                _coerce_timeout(timeout_sec),
+            )
+            data = json.loads(raw_response.decode("utf-8") if isinstance(raw_response, bytes) else raw_response)
+        except Exception:
+            return None
+
+        if not isinstance(data, dict):
+            return None
+        user_agent = str(data.get("user_agent") or "").strip()
+        target_host = _host_from_url(target_url)
+        cookies = _filter_flaresolverr_cookies(data.get("cookies"), target_host)
+        if not cookies and not user_agent:
+            return None
+        return ClearanceBundle(
+            target_host=target_host,
+            proxy_url=normalize_proxy_url(proxy_url),
+            cookies=cookies,
+            user_agent=user_agent,
+        )
+
+    @staticmethod
+    def _urllib_get(endpoint: str, headers: dict[str, str], timeout: float) -> bytes:
+        req = urllib_request.Request(endpoint, headers=headers, method="GET")
+        with urllib_request.urlopen(req, timeout=timeout) as response:
+            return response.read()
+
+
 class ProxySettingsStore:
     def __init__(
         self,
@@ -165,6 +228,8 @@ class ProxySettingsStore:
         self._clearance_provider_factory = clearance_provider_factory or FlareSolverrClearanceProvider
         self._clearance_cache: dict[tuple[str, str], ClearanceBundle] = {}
         self._provider_cache: dict[str, FlareSolverrClearanceProvider] = {}
+        self._solver_provider: SentinelSolverClearanceProvider | None = None
+        self._clearance_backoff: dict[str, float] = {}
         self._flight_locks: dict[tuple[str, str], threading.Lock] = {}
         self._lock = threading.RLock()
 
@@ -240,6 +305,7 @@ class ProxySettingsStore:
         proxy: str = "",
         resource: bool = False,
         upstream: bool = True,
+        force_user_agent: bool = False,
     ) -> dict[str, object]:
         merged_headers: dict[str, object] = dict(headers or {})
         profile = self.get_profile(account=account, proxy=proxy, resource=resource, upstream=upstream)
@@ -251,8 +317,13 @@ class ProxySettingsStore:
         if bundle is None or not bundle.is_valid_for(target_host, profile.proxy_url):
             return merged_headers
 
-        if bundle.user_agent and _find_header_key(merged_headers, "user-agent") is None:
-            merged_headers["User-Agent"] = bundle.user_agent
+        existing_user_agent_key = _find_header_key(merged_headers, "user-agent")
+        if bundle.user_agent and (force_user_agent or existing_user_agent_key is None):
+            # cf_clearance is only valid for the exact User-Agent that solved it,
+            # so the client hints have to describe the same browser too.
+            merged_headers[existing_user_agent_key or "User-Agent"] = bundle.user_agent
+            for hint, value in client_hints_for_user_agent(bundle.user_agent).items():
+                merged_headers[_find_header_key(merged_headers, hint) or hint] = value
 
         if bundle.cookies:
             cookie_key = _find_header_key(merged_headers, "cookie") or "Cookie"
@@ -270,6 +341,7 @@ class ProxySettingsStore:
         resource: bool = False,
         force: bool = False,
         upstream: bool = True,
+        ignore_backoff: bool = False,
     ) -> ClearanceBundle | None:
         profile = self.get_profile(account=account, proxy=proxy, resource=resource, upstream=upstream)
         if not profile.clearance_enabled:
@@ -282,11 +354,13 @@ class ProxySettingsStore:
             if bundle is not None:
                 self._set_cached_bundle(key, bundle)
             return bundle
-        if profile.clearance_mode != "flaresolverr":
+        if profile.clearance_mode not in {"flaresolverr", "solver"}:
             return None
 
         cached_before = self._get_cached_bundle(key)
         if cached_before is not None and not force and cached_before.is_valid_for(target_host, profile.proxy_url):
+            return cached_before
+        if not ignore_backoff and self._in_clearance_backoff(target_host):
             return cached_before
 
         lock = self._get_flight_lock(key)
@@ -300,9 +374,16 @@ class ProxySettingsStore:
             if cached_now is not None and not force and cached_now.is_valid_for(target_host, profile.proxy_url):
                 return cached_now
 
-            flaresolverr_url = str(profile.clearance.get("flaresolverr_url") or "").strip()
-            provider = self._get_provider(flaresolverr_url)
-            new_bundle = provider.get_clearance(target_url, proxy_url=profile.proxy_url, timeout_sec=profile.timeout_sec)
+            provider = self._provider_for(profile)
+            new_bundle = (
+                provider.get_clearance(target_url, proxy_url=profile.proxy_url, timeout_sec=profile.timeout_sec)
+                if provider is not None
+                else None
+            )
+            if new_bundle is None:
+                self._mark_clearance_failure(target_host)
+            else:
+                self._clear_clearance_failure(target_host)
             if new_bundle is not None:
                 expires_at = time.time() + profile.refresh_interval if profile.refresh_interval else None
                 if (
@@ -321,6 +402,19 @@ class ProxySettingsStore:
             return cached_now or cached_before
         finally:
             lock.release()
+
+    def _in_clearance_backoff(self, target_host: str) -> bool:
+        with self._lock:
+            until = self._clearance_backoff.get(_normalize_host(target_host), 0.0)
+        return bool(until) and time.time() < until
+
+    def _mark_clearance_failure(self, target_host: str) -> None:
+        with self._lock:
+            self._clearance_backoff[_normalize_host(target_host)] = time.time() + CLEARANCE_FAILURE_COOLDOWN_SECONDS
+
+    def _clear_clearance_failure(self, target_host: str) -> None:
+        with self._lock:
+            self._clearance_backoff.pop(_normalize_host(target_host), None)
 
     def invalidate_clearance(
         self,
@@ -366,7 +460,7 @@ class ProxySettingsStore:
             if bundle is not None:
                 self._set_cached_bundle(key, bundle)
             return bundle
-        if profile.clearance_mode == "flaresolverr":
+        if profile.clearance_mode in {"flaresolverr", "solver"}:
             return self._get_cached_bundle(key)
         return None
 
@@ -389,6 +483,27 @@ class ProxySettingsStore:
             created_at=now,
             expires_at=expires_at,
         )
+
+    def _provider_for(self, profile: ProxyRuntimeProfile):
+        """Clearance provider for the configured mode, or None when unconfigured."""
+        if profile.clearance_mode == "solver":
+            return self._get_solver_provider()
+        return self._get_provider(str(profile.clearance.get("flaresolverr_url") or "").strip())
+
+    def _get_solver_provider(self) -> SentinelSolverClearanceProvider | None:
+        try:
+            base_url = str(self._config.sentinel_solver_url or "").strip()
+            key = str(self._config.sentinel_solver_key or "").strip()
+        except AttributeError:
+            return None
+        if not base_url:
+            return None
+        with self._lock:
+            provider = self._solver_provider
+            if provider is not None and provider.base_url == base_url.rstrip("/") and provider.key == key:
+                return provider
+            self._solver_provider = SentinelSolverClearanceProvider(base_url, key)
+            return self._solver_provider
 
     def _get_provider(self, flaresolverr_url: str) -> FlareSolverrClearanceProvider:
         url = str(flaresolverr_url or "").strip().rstrip("/")
@@ -422,6 +537,31 @@ class ProxySettingsStore:
 
 def _clean(value: object) -> str:
     return str(value or "").strip()
+
+
+def client_hints_for_user_agent(user_agent: str) -> dict[str, str]:
+    """Client hints that describe the same browser as `user_agent`.
+
+    A clearance cookie is bound to the User-Agent that solved the challenge, so
+    overriding the UA without the matching Sec-Ch-Ua* headers still looks like a
+    different browser to Cloudflare.
+    """
+    agent = str(user_agent or "")
+    match = re.search(r"Chrome/(\d+)", agent)
+    major = match.group(1) if match else "146"
+    if "Linux" in agent:
+        platform = '"Linux"'
+    elif "Macintosh" in agent or "Mac OS X" in agent:
+        platform = '"macOS"'
+    else:
+        platform = '"Windows"'
+    return {
+        "Sec-Ch-Ua": f'"Chromium";v="{major}", "Google Chrome";v="{major}", "Not/A)Brand";v="99"',
+        "Sec-Ch-Ua-Full-Version": f'"{major}.0.0.0"',
+        "Sec-Ch-Ua-Full-Version-List": f'"Chromium";v="{major}.0.0.0", "Not/A)Brand";v="99.0.0.0"',
+        "Sec-Ch-Ua-Mobile": "?0",
+        "Sec-Ch-Ua-Platform": platform,
+    }
 
 
 def _colon_proxy_to_url(url: str) -> str:
@@ -609,7 +749,7 @@ def test_clearance(target_url: str = "https://chatgpt.com") -> dict:
             "runtime": status,
         }
     try:
-        bundle = proxy_settings.refresh_clearance(target_url=target_url, force=True, upstream=True)
+        bundle = proxy_settings.refresh_clearance(target_url=target_url, force=True, upstream=True, ignore_backoff=True)
     except Exception as exc:
         latency_ms = int((time.perf_counter() - started) * 1000)
         return {

@@ -16,6 +16,7 @@ Turnstile。主服务本身不打包浏览器，只通过 HTTP 调用这里。
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/health` | 页面状态及页面使用的 UA（主服务据此生成 requirements/proof token） |
+| GET | `/v1/clearance` | 返回本页已通过的 Cloudflare 清障（`user_agent` + `cookies`），供主服务在被盾拦截时复用 |
 | POST | `/v1/turnstile` | `{"dx", "p", "requirements"}` → `{"token"}`；`requirements` 是 prepare 的完整响应，给了它就调用页面自带的 turnstile 模块求解；只给 `dx`/`p` 时退回内置 VM |
 | POST | `/v1/so` | `{"collector_dx", "snapshot_dx", "p"}` → `{"token"}`；目前对话接口还不强制要求 |
 
@@ -30,6 +31,23 @@ Turnstile。主服务本身不打包浏览器，只通过 HTTP 调用这里。
 
 求解服务只接收 `dx`、`p` 和 prepare 响应等挑战参数。账号 access token、Cookie、用户 prompt 都不会离开主
 服务进程。建议仅在内网提供服务，并配置访问密钥。
+
+### 清障（clearance）
+
+主服务不带浏览器，直连 chatgpt.com 时会被 Cloudflare 挑战。本页已经在盾后面，所以可以把它的
+`user_agent` 和 cookie 交给主服务：`GET /v1/clearance` 返回 `{"ready", "user_agent", "cookies"}`，
+主服务把这些 cookie 注入请求，并**同时把 UA 换成这里返回的 UA** —— `cf_clearance` 只对求解它的
+UA + 出口 IP 有效，UA 不一致时请求依旧会被挑战。
+
+把清障模式设为 `solver` 即可启用（`config.json` 或 `CHATGPT2API_PROXY_RUNTIME_CLEARANCE_MODE=solver`）：
+
+```json
+"clearance": { "enabled": true, "mode": "solver" }
+```
+
+`mode=solver` 不需要额外配置 URL，直接复用 `sentinel_solver_url` / `sentinel_solver_key`，也不再要求
+代理运行时处于开启状态。主服务在 bootstrap 或对话请求遇到挑战页时会自动取一次清障并重试一次；取不到
+就按原样报错。provider 连续失败有 30 秒冷却，避免每个请求都白等一次超时。
 
 ## 部署
 

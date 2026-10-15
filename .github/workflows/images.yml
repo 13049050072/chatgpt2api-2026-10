@@ -1,4 +1,4 @@
-name: pr418-images
+name: images
 
 on:
   push:
@@ -11,7 +11,27 @@ permissions:
   packages: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install dependencies
+        run: uv sync --frozen --no-dev --no-install-project
+      - name: Sentinel / clearance regression tests
+        run: |
+          uv run python -m unittest \
+            test.test_clearance_solver \
+            test.test_cloudflare_retry \
+            test.test_fingerprint_consistency \
+            test.test_sentinel_handshake \
+            test.test_image_stream_retry \
+            test.test_init_proxy_config \
+            test.test_proxy_runtime_config \
+            test.test_proxy_service
+
   build-app:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,9 +47,10 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: ghcr.io/sakuralaaa/chatgpt2api-pr418:latest
+          tags: ghcr.io/sakuralaaa/chatgpt2api-2026-10:latest
 
   build-solver:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -45,4 +66,4 @@ jobs:
           context: ./sentinel_solver
           file: ./sentinel_solver/Dockerfile
           push: true
-          tags: ghcr.io/sakuralaaa/chatgpt2api-pr418-sentinel-solver:latest
+          tags: ghcr.io/sakuralaaa/chatgpt2api-2026-10-sentinel-solver:latest

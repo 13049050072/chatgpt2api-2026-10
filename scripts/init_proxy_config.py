@@ -61,7 +61,7 @@ def _env_int(name: str, default: int, minimum: int = 0) -> int:
 def _warp_runtime_defaults() -> dict[str, Any]:
     clearance_enabled = _env_bool("CHATGPT2API_PROXY_RUNTIME_CLEARANCE_ENABLED", True)
     clearance_mode = os.getenv("CHATGPT2API_PROXY_RUNTIME_CLEARANCE_MODE", "flaresolverr").strip().lower()
-    if clearance_mode not in {"none", "manual", "flaresolverr"}:
+    if clearance_mode not in {"none", "manual", "flaresolverr", "solver"}:
         clearance_mode = "flaresolverr" if clearance_enabled else "none"
     if not clearance_enabled:
         clearance_mode = "none"

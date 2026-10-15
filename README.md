@@ -66,6 +66,11 @@ docker compose -f docker-compose.warp.yml up -d --build
 
 可在 `.env` 中调整端口和代理运行时参数，也可在后台设置页的「稳定代理运行时」面板手动保存、测试代理和测试 clearance。
 
+清障（clearance）支持三种模式：`manual`（手填 cookie/UA）、`flaresolverr`（用 FlareSolverr 解盾）、
+`solver`（直接复用 sentinel 求解服务里已过盾的浏览器身份，适合**不挂代理**的部署）。启用后主服务会把
+清障 cookie 注入 bootstrap 与对话请求，并强制把 UA 换成求解方的 UA —— `cf_clearance` 只对求解它的 UA
+和出口 IP 有效。取不到清障时按原样报错，且 provider 失败后有 30 秒冷却。
+
 ### 本地开发
 
 启动后端：

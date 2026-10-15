@@ -225,7 +225,7 @@ def _normalize_proxy_runtime_settings(value: object) -> dict[str, object]:
         egress_mode = str(DEFAULT_PROXY_RUNTIME["egress_mode"])
 
     clearance_mode = str(clearance_source.get("mode") or default_clearance["mode"]).strip().lower()
-    if clearance_mode not in {"none", "manual", "flaresolverr"}:
+    if clearance_mode not in {"none", "manual", "flaresolverr", "solver"}:
         clearance_mode = str(default_clearance["mode"])
 
     user_agent = str(clearance_source.get("user_agent") or default_clearance["user_agent"]).strip()

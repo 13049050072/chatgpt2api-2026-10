@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any, Dict, Iterator, Optional
+from typing import Any, Dict, Iterator, Mapping, Optional
 from urllib.parse import unquote, urlparse
 
 from curl_cffi import requests
@@ -67,6 +67,15 @@ class ChatRequirements:
 
 DEFAULT_CLIENT_VERSION = "prod-a194cd50d4416d3c0b47c740f206b12ce60f5887"
 DEFAULT_CLIENT_BUILD_NUMBER = "6708908"
+def _header_value(headers: Mapping[str, str], name: str) -> str:
+    """Case-insensitive header lookup for merged clearance headers."""
+    target = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == target:
+            return str(value or "")
+    return ""
+
+
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
 DEFAULT_IMPERSONATE = "chrome146"
 LEGACY_IMPERSONATES = {"chrome110", "edge101"}
@@ -199,6 +208,7 @@ class OpenAIBackendAPI:
         self.session_id = self.fp["oai-session-id"]
         self.pow_script_sources: list[str] = []
         self.pow_data_build = ""
+        self._warm_clearance()
         self.progress_callback: Callable[[str], None] | None = None
         self.session = requests.Session(**proxy_settings.build_session_kwargs(
             account=self.account,
@@ -283,13 +293,67 @@ class OpenAIBackendAPI:
         return fp
 
     def _headers(self, path: str, extra: Optional[Dict[str, str]] = None) -> Dict[str, str]:
-        """构造请求头，并补上 web 端要求的 target path/route。"""
+        """构造请求头，并补上 web 端要求的 target path/route 与清障 cookie。"""
         headers = dict(self.session.headers)
         headers["X-OpenAI-Target-Path"] = path
         headers["X-OpenAI-Target-Route"] = path
         if extra:
             headers.update(extra)
-        return headers
+        return self._with_clearance(headers, path)
+
+    def _with_clearance(self, headers: Dict[str, str], path: str) -> Dict[str, str]:
+        """合并 Cloudflare 清障结果（cookie + User-Agent）。
+
+        cf_clearance 只在"求解时使用的 User-Agent + 同一出口 IP"下有效，所以这里
+        强制覆盖 UA 并同步客户端提示；否则请求依旧会被 Cloudflare 挑战。
+        """
+        try:
+            merged = proxy_settings.build_headers(
+                headers=headers,
+                target_url=self.base_url + (path or "/"),
+                account=self.account,
+                upstream=True,
+                force_user_agent=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning({"event": "clearance_header_failed", "error": str(exc)})
+            return headers
+        resolved = {str(key): str(value) for key, value in merged.items()}
+        user_agent = _header_value(resolved, "user-agent")
+        if user_agent:
+            self.user_agent = user_agent
+        return resolved
+
+    def _refresh_clearance(self) -> bool:
+        """重新取一份清障结果；成功时沿用求解方的 User-Agent。"""
+        try:
+            profile = proxy_settings.get_profile(account=self.account, upstream=True)
+        except Exception:  # noqa: BLE001
+            return False
+        if not profile.clearance_enabled:
+            return False
+        try:
+            bundle = proxy_settings.refresh_clearance(
+                target_url=self.base_url + "/", account=self.account, force=True, upstream=True
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning({"event": "clearance_refresh_failed", "error": str(exc)})
+            return False
+        if bundle is None:
+            logger.warning({"event": "clearance_refresh_empty"})
+            return False
+        if bundle.user_agent:
+            self.user_agent = bundle.user_agent
+        return True
+
+    def _warm_clearance(self) -> None:
+        """可选的启动预热：让首个请求就带上可用的 cf_clearance。"""
+        try:
+            profile = proxy_settings.get_profile(account=self.account, upstream=True)
+        except Exception:  # noqa: BLE001
+            return
+        if profile.clearance_enabled and bool(profile.clearance.get("warm_up_on_start")):
+            self._refresh_clearance()
 
     @staticmethod
     def _extract_quota_and_restore_at(limits_progress: list[Any]) -> tuple[int, str | None]:
@@ -422,8 +486,8 @@ class OpenAIBackendAPI:
         return result
 
     def _bootstrap_headers(self) -> Dict[str, str]:
-        """构造首页预热请求头。"""
-        return {
+        """构造首页预热请求头（含 Cloudflare 清障 cookie 与对应 UA）。"""
+        return self._with_clearance({
             "User-Agent": self.user_agent,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
@@ -435,7 +499,7 @@ class OpenAIBackendAPI:
             "Sec-Fetch-Site": "none",
             "Sec-Fetch-User": "?1",
             "Upgrade-Insecure-Requests": "1",
-        }
+        }, "/")
 
     def _drop_restricted_cookies(self) -> None:
         """移除 finalize 设置的限制 Cookie，避免后续对话伪装返回 Model not found。"""
@@ -2730,6 +2794,13 @@ class OpenAIBackendAPI:
             headers=self._bootstrap_headers(),
             timeout=30,
         )
+        # 没有代理的部署会被 Cloudflare 直接挑战；先取一次清障结果再重试。
+        if self._is_cloudflare_challenge(response) and self._refresh_clearance():
+            response = self.session.get(
+                self.base_url + "/",
+                headers=self._bootstrap_headers(),
+                timeout=30,
+            )
         ensure_ok(response, "bootstrap")
         self.pow_script_sources, self.pow_data_build = parse_pow_resources(response.text)
         if not self.pow_script_sources:

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
++ [修复] 修正 Cloudflare 清障（clearance）只缓存不生效的问题：主服务现在会把清障 cookie 真正注入
+  bootstrap 与对话请求，并强制把 UA 换成求解方的 UA（`cf_clearance` 只对求解它的 UA + 出口 IP 有效），
+  客户端提示（`Sec-Ch-Ua*`）同步对齐。
++ [新增] 清障新增 `solver` 模式：直接复用 sentinel 求解服务里已过盾的浏览器身份（新增
+  `GET /v1/clearance`），无需额外部署 FlareSolverr，也不再要求代理运行时开启，适合直连部署。
++ [新增] 清障 provider 失败后 30 秒冷却，避免每个请求都白等一次求解超时。
++ [同步] 合入上游 PR #418 的两个后续修复：`chrome146` 指纹与请求头对齐（不再混用 Edge 身份）、
+  账号刷新遇到 Cloudflare 挑战 403 时最多重试三次（JSON 403 不重试）。
+
 ## 1.8.0 - 2026-07-28
 
 + [新增] 新增默认请求上游模型名称和默认思考强度配置，支持在设置页面修改，并可通过模型名的 `-standard`、`-extended`、`-max` 后缀覆盖思考强度。
