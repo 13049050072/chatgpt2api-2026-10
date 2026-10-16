@@ -214,6 +214,7 @@ class OpenAIBackendAPI:
             account=self.account,
             impersonate=self.fp["impersonate"],
             verify=True,
+            upstream=True,
         ))
         self.session.headers.update({
             "User-Agent": self.user_agent,
