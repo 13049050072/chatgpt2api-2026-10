@@ -1,9 +1,9 @@
 """The browser identity we advertise must describe the client the TLS profile emulates.
 
-This is a deterministic guard on purpose. The mismatch it catches (a chrome146 TLS
-fingerprint carrying Edge 143 headers) shows up upstream only as an intermittent
-Cloudflare challenge, which cannot be measured reliably request by request — so the
-invariant is asserted here instead.
+This is a deterministic guard on purpose. The mismatch it catches (one browser's TLS
+fingerprint carrying another browser's headers) shows up upstream only as an
+intermittent Cloudflare challenge, which cannot be measured reliably request by
+request — so the invariant is asserted here instead.
 """
 
 from __future__ import annotations
@@ -62,12 +62,36 @@ class FingerprintConsistencyTests(unittest.TestCase):
             self.assertNotEqual(self.api.fp["impersonate"], legacy)
 
     def test_a_stored_legacy_fingerprint_is_upgraded(self):
-        # Accounts that carry an old fp must not keep an edge101 profile.
+        # Accounts that carry an old fp must not keep a replaced TLS profile.
         with self._cached_account({"fp": {"impersonate": "edge101"}}):
             api = OpenAIBackendAPI("test-token")
             self.addCleanup(api.close)
             self.assertEqual(api.fp["impersonate"], backend.DEFAULT_IMPERSONATE)
             self.assertEqual(api.fp["user-agent"], backend.FINGERPRINT_UA)
+
+    def test_a_replaced_profile_drops_the_stale_browser_identity(self):
+        stale_ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
+        )
+        with self._cached_account({
+            "fp": {"impersonate": "chrome146"},
+            "user-agent": stale_ua,
+            "sec-ch-ua": '"Chromium";v="146", "Google Chrome";v="146", "Not/A)Brand";v="99"',
+        }):
+            api = OpenAIBackendAPI("test-token")
+            self.addCleanup(api.close)
+            self.assertEqual(api.fp["impersonate"], backend.DEFAULT_IMPERSONATE)
+            self.assertEqual(api.fp["user-agent"], backend.FINGERPRINT_UA)
+            self.assertEqual(api.fp["sec-ch-ua"], backend.FINGERPRINT_SEC_CH_UA)
+
+    def test_the_default_profile_is_not_a_cloudflare_blocked_one(self):
+        # Measured against chatgpt.com from the production egress: these JA3
+        # profiles are answered with a Cloudflare challenge page instead of the
+        # app shell. chrome124/chrome110/chrome99 do get the app shell.
+        blocked = {"chrome120", "chrome131", "chrome133a", "chrome136", "chrome142", "chrome145", "chrome146"}
+        self.assertNotIn(backend.DEFAULT_IMPERSONATE, blocked)
+        self.assertTrue(set(backend.LEGACY_IMPERSONATES) & blocked)
 
     class _cached_account:  # noqa: N801 - small helper, used as a context manager
         def __init__(self, account: dict):

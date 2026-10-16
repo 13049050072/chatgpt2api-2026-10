@@ -2,6 +2,10 @@
 
 ## Unreleased
 
++ [修复] 默认 TLS 指纹由 `chrome146` 换成 `chrome124`：实测同一出口 IP 下 chatgpt.com 对
+  `chrome145`/`chrome146` 直接返回 Cloudflare 挑战页（403，无论请求头怎么写），而 `chrome124` 能正常
+  拿到应用首页。被替换的旧档位（`chrome110`/`chrome145`/`chrome146`/`edge101`）若存在账号指纹里，
+  会连同 User-Agent 与 `Sec-Ch-Ua*` 一起升级，避免「旧 UA + 新 TLS」再次触发挑战。
 + [修复] 修正 Cloudflare 清障（clearance）只缓存不生效的问题：主服务现在会把清障 cookie 真正注入
   bootstrap 与对话请求，并强制把 UA 换成求解方的 UA（`cf_clearance` 只对求解它的 UA + 出口 IP 有效），
   客户端提示（`Sec-Ch-Ua*`）同步对齐。

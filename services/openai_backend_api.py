@@ -77,10 +77,10 @@ def _header_value(headers: Mapping[str, str], name: str) -> str:
 
 
 DEFAULT_POW_SCRIPT = "https://chatgpt.com/backend-api/sentinel/sdk.js"
-DEFAULT_IMPERSONATE = "chrome146"
-LEGACY_IMPERSONATES = {"chrome110", "edge101"}
+DEFAULT_IMPERSONATE = "chrome124"
+LEGACY_IMPERSONATES = {"chrome110", "chrome145", "chrome146", "edge101"}
 # 请求头中的浏览器版本与 TLS 配置保持一致，避免混用 Edge 身份。
-_FINGERPRINT_BROWSER_VERSION = DEFAULT_IMPERSONATE.removeprefix("chrome") or "146"
+_FINGERPRINT_BROWSER_VERSION = DEFAULT_IMPERSONATE.removeprefix("chrome") or "124"
 FINGERPRINT_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     f"(KHTML, like Gecko) Chrome/{_FINGERPRINT_BROWSER_VERSION}.0.0.0 Safari/537.36"
@@ -282,9 +282,15 @@ class OpenAIBackendAPI:
             value = str(account.get(key) or "").strip()
             if value:
                 fp[key] = value
-        fp.setdefault("user-agent", FINGERPRINT_UA)
         if fp.get("impersonate") in LEGACY_IMPERSONATES:
+            # The stored TLS profile was replaced, so the advertised identity has
+            # to be replaced with it. Keeping the old User-Agent and client hints
+            # would recreate the TLS-vs-headers mismatch Cloudflare answers with a
+            # challenge instead of the app shell.
             fp.pop("impersonate")
+            for stale in ("user-agent", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"):
+                fp.pop(stale, None)
+        fp.setdefault("user-agent", FINGERPRINT_UA)
         fp.setdefault("impersonate", DEFAULT_IMPERSONATE)
         fp.setdefault("oai-device-id", new_uuid())
         fp.setdefault("oai-session-id", new_uuid())

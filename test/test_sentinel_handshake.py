@@ -157,11 +157,11 @@ class SentinelHandshakeTests(unittest.TestCase):
     def test_old_tls_profiles_are_replaced_and_custom_profile_is_preserved(self):
         api = OpenAIBackendAPI("")
         self.addCleanup(api.close)
-        for old in ("chrome110", "edge101", ""):
+        for old in ("chrome110", "chrome145", "chrome146", "edge101", ""):
             api.account = {"impersonate": old}
-            self.assertEqual(api._build_fp()["impersonate"], "chrome146")
-        api.account = {"impersonate": "chrome145"}
-        self.assertEqual(api._build_fp()["impersonate"], "chrome145")
+            self.assertEqual(api._build_fp()["impersonate"], "chrome124")
+        api.account = {"impersonate": "chrome131"}
+        self.assertEqual(api._build_fp()["impersonate"], "chrome131")
 
     def test_image_prepare_and_conversation_share_trace_and_current_payload(self):
         api = OpenAIBackendAPI("")
